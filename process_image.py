@@ -1,6 +1,6 @@
 import os
+import sys
 import cv2
-import hydra
 import torch
 import argparse
 import scipy
@@ -11,6 +11,7 @@ from PIL import Image
 from tqdm import tqdm
 from pathlib import Path
 from omegaconf import DictConfig, OmegaConf
+from hydra import compose, initialize_config_dir
 from hydra.utils import instantiate
 from accelerate import load_checkpoint_and_dispatch
 from accelerate.utils import set_seed
@@ -239,17 +240,14 @@ def get_image_files(input_path):
         raise ValueError(f"Input path {input_path} does not exist")
 
 
-@hydra.main(version_base=None, config_path='config', config_name='generate_mono')
-def main(cfg: DictConfig) -> None:
+def main() -> None:
     """
     Main processing function for unified mono depth estimation and stereo pair generation.
     
     This script combines the functionality of generate_mono.py and generate_stereo.py
     into a single pipeline that processes individual images or folders of images.
     """
-    logger = get_logger(__name__)
-    
-    # Parse additional command line arguments
+    # Parse command line arguments first
     usage_examples = """
 Examples:
 
@@ -286,10 +284,21 @@ Output files for each input image 'name.jpg':
     parser.add_argument('--input', type=str, required=True, help='Input image file or directory')
     parser.add_argument('--output', type=str, default='output', help='Output directory (default: output)')
     parser.add_argument('--mono_checkpoint', type=str, default=None, help='Path to mono depth checkpoint (default: from config)')
-    parser.add_argument('--stereo_config', type=str, default='config/generate_stereo.yaml', help='Path to stereo config (default: config/generate_stereo.yaml)')
+    parser.add_argument('--mono_config', type=str, default='generate_mono', help='Mono config name (default: generate_mono)')
+    parser.add_argument('--stereo_config', type=str, default='generate_stereo', help='Stereo config name (default: generate_stereo)')
     parser.add_argument('--num_inference_steps', type=int, default=50, help='Number of inference steps for stereo generation (default: 50)')
     parser.add_argument('--dilate_iteration', type=int, default=1, help='Number of dilation iterations for disparity (default: 1)')
-    args, unknown = parser.parse_known_args()
+    args = parser.parse_args()
+    
+    # Load Hydra configurations
+    script_dir = Path(__file__).parent.absolute()
+    config_dir = str(script_dir / 'config')
+    
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        cfg_mono = compose(config_name=args.mono_config)
+        cfg_stereo = compose(config_name=args.stereo_config)
+    
+    logger = get_logger(__name__)
     
     # Get image files
     image_files = get_image_files(args.input)
@@ -310,16 +319,16 @@ Output files for each input image 'name.jpg':
     logger.info('Step 1: Loading mono depth estimation model')
     logger.info('=' * 50)
     
-    accelerator_mono = instantiate(cfg.accelerator)
-    model_mono = fetch_model(cfg, logger)
+    accelerator_mono = instantiate(cfg_mono.accelerator)
+    model_mono = fetch_model(cfg_mono, logger)
     
-    checkpoint_path = args.mono_checkpoint if args.mono_checkpoint else cfg.checkpoint
+    checkpoint_path = args.mono_checkpoint if args.mono_checkpoint else cfg_mono.checkpoint
     model_mono = load_checkpoint_and_dispatch(model_mono, checkpoint_path)
     model_mono.eval()
     logger.info(f'Loaded mono checkpoint from {checkpoint_path}')
     
     model_mono = accelerator_mono.prepare(model_mono)
-    set_seed(cfg.seed, device_specific=True)
+    set_seed(cfg_mono.seed, device_specific=True)
     
     # ============================
     # Step 2: Process mono depth for all images
@@ -331,7 +340,7 @@ Output files for each input image 'name.jpg':
     disp_files = []
     for image_file in tqdm(image_files, desc='Processing depth', disable=not accelerator_mono.is_main_process):
         disp_file = process_mono_depth(
-            cfg, accelerator_mono, model_mono, 
+            cfg_mono, accelerator_mono, model_mono, 
             image_file, str(output_dir), 
             dilate_iteration=args.dilate_iteration
         )
@@ -348,13 +357,6 @@ Output files for each input image 'name.jpg':
     logger.info('=' * 50)
     logger.info('Step 3: Loading stereo generation model')
     logger.info('=' * 50)
-    
-    # Load stereo config
-    from hydra import compose, initialize_config_dir
-    config_dir = os.path.join(os.getcwd(), 'config')
-    
-    with initialize_config_dir(config_dir=config_dir, version_base=None):
-        cfg_stereo = compose(config_name='generate_stereo')
     
     # Override num_inference_steps if provided
     cfg_stereo.num_inference_step = args.num_inference_steps
