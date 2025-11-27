@@ -1,0 +1,16 @@
+defaults:
+  - model: depth_anything_v2.yaml
+  - _self_
+
+gpus: ${oc.env:CUDA_VISIBLE_DEVICES, '0'}
+seed: 666
+checkpoint: checkpoint/depth_anything_v2/depth_anything_v2_vitl.pth
+
+accelerator:
+  _target_: accelerate.Accelerator
+  dataloader_config:
+    _target_: accelerate.DataLoaderConfiguration
+    split_batches: True
+
+dilate_iteration: 1
+
