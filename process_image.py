@@ -6,6 +6,7 @@ import argparse
 import scipy
 import skimage
 import numpy as np
+import logging
 import torch.nn.functional as F
 from PIL import Image
 from tqdm import tqdm
@@ -298,15 +299,17 @@ Output files for each input image 'name.jpg':
         cfg_mono = compose(config_name=args.mono_config)
         cfg_stereo = compose(config_name=args.stereo_config)
     
-    logger = get_logger(__name__)
+    # Use standard logging before accelerators are initialized
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    temp_logger = logging.getLogger(__name__)
     
     # Get image files
     image_files = get_image_files(args.input)
     if not image_files:
-        logger.error("No image files found!")
+        temp_logger.error("No image files found!")
         return
     
-    logger.info(f'Found {len(image_files)} image(s) to process')
+    temp_logger.info(f'Found {len(image_files)} image(s) to process')
     
     # Create output directory
     output_dir = Path(args.output)
@@ -315,11 +318,21 @@ Output files for each input image 'name.jpg':
     # ============================
     # Step 1: Setup mono depth model
     # ============================
+    # Ensure mono accelerator uses same mixed_precision as stereo to avoid state conflicts
+    # AcceleratorState is global and can't be changed after first initialization
+    stereo_mixed_precision = cfg_stereo.accelerator.get('mixed_precision', None)
+    if stereo_mixed_precision is not None:
+        # Use stereo's mixed_precision for mono to ensure compatibility
+        OmegaConf.update(cfg_mono.accelerator, 'mixed_precision', stereo_mixed_precision, force_add=True)
+    
+    accelerator_mono = instantiate(cfg_mono.accelerator)
+    # Now we can use accelerate's logger since accelerator is initialized
+    logger = get_logger(__name__)
+    
     logger.info('=' * 50)
     logger.info('Step 1: Loading mono depth estimation model')
     logger.info('=' * 50)
     
-    accelerator_mono = instantiate(cfg_mono.accelerator)
     model_mono = fetch_model(cfg_mono, logger)
     
     checkpoint_path = args.mono_checkpoint if args.mono_checkpoint else cfg_mono.checkpoint
